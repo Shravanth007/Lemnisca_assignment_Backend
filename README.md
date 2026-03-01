@@ -84,7 +84,7 @@ Conversation history is maintained in-memory using a `conversation_id`. Each new
 ### Live Deploy
 
 The frontend is deployed on Vercel and is live at:
-https://lemnisca-assignment-frontend-jgwo.vercel.app/
+https://clear-path-frontend.vercel.app/
 
 The backend is configured for Vercel deployment using `vercel.json`.
 
