@@ -15,9 +15,10 @@ import os
 import sys
 import time
 import uuid
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -37,10 +38,21 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_default_origins = [
+    "https://clear-path-frontend.vercel.app",
+    "http://localhost:3000",
+]
+_allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
+allowed_origins = (
+    [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+    if _allowed_origins_env
+    else _default_origins
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -62,7 +74,7 @@ async def startup_event():
 
 
 class QueryRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=500)
     conversation_id: Optional[str] = None
 
 
@@ -97,10 +109,35 @@ class QueryResponse(BaseModel):
 _conversations: Dict[str, List[Dict[str, str]]] = {}
 
 
+# ponytail: in-memory per-IP limiter, single-instance only; move to slowapi/redis if scaled out
+_RATE_LIMIT = 10
+_RATE_WINDOW_SECONDS = 60
+_request_log: Dict[str, deque] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    # X-Forwarded-For is spoofable, but here it only lets someone shard their own rate limit.
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_rate_limit(ip: str) -> None:
+    now = time.time()
+    timestamps = _request_log[ip]
+    while timestamps and now - timestamps[0] > _RATE_WINDOW_SECONDS:
+        timestamps.popleft()
+    if len(timestamps) >= _RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
+    timestamps.append(now)
+
 
 @app.post("/query", response_model=QueryResponse)
-async def query_endpoint(req: QueryRequest):
-   
+async def query_endpoint(req: QueryRequest, request: Request):
+
+    _enforce_rate_limit(_client_ip(request))
+
     start = time.perf_counter()
 
     conv_id = req.conversation_id or f"conv_{uuid.uuid4().hex[:12]}"
